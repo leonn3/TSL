@@ -1,0 +1,190 @@
+%@autor: Woldson Leonne
+%Activity 5
+clear all; close all; clc;
+
+%Application of the LQG method compared to control techniques
+%used in article: https://ieeexplore.ieee.org/document/8711871
+
+%Model used in the paper
+num = [11.7304 22.578];
+den = [1 4.9676 12.941 0];
+sysc = tf(num,den)
+
+%Reproduction of the PID with tuning in the base article
+Kp = 5;
+Ki = 0.25;
+Kd = 1;
+
+Ts = 0.01; 
+C_pid = pid(Kp,Ki,Kd,0,Ts);
+sysd = c2d(sysc,Ts);
+H = feedback(C_pid*sysd,1);
+y_pid = step(H,5);
+
+%representation in SS
+[A,B,C,D] = tf2ss(num,den);
+sysc_ss = ss(A,B,C,D);
+
+% Checking if the system realization is controllable
+ Co = [B A*B (A^2)*B]
+  if rank(Co) == length(A)
+      disp('The system is controllable');
+  else
+      disp('The system is not controllable');
+  end
+
+% Checking if the system realization is observable
+  Ob = [C ; C*A; C*(A^2)]
+  if rank(Ob) == length(A)
+      disp('The system is observable');
+  else
+      disp('The system is not observable');
+  end
+  
+%Bode analysis
+figure();
+bode(sysc);grid minor
+
+disp('G(s) poles and A matrix eigenvalues:');
+pole(sysc_ss), eig(A)
+
+% Discrete model
+sysd = c2d(sysc_ss,Ts); % open-loop design model
+[Ad,Bd,Cd,Dd] = ssdata(sysd);
+
+% Augmented system
+ny = 1; n=3;
+
+Aa = [eye(ny,ny) Cd*Ad;
+      zeros(n,ny) Ad]
+  
+Ba = [Cd*Bd; Bd]
+
+Ca = [eye(ny,ny) zeros(ny,n)]
+
+Da = Dd
+
+% Controllability and observability test
+disp('Number of state variables: n = '); length(Aa)
+disp('Controllability check: rank(Co)'); rank(ctrb(Aa,Ba))
+disp('Observability check: rank(Ob)');rank(obsv(Aa,Ca))
+
+% Linear Quadratic Controller design:
+Qlq = diag([500 0.01 0.01 0.01]); % Semi-positive definite matrix
+Rlq = 1; % Positive definite matrix
+[K,Plq] = dlqr(Aa,Ba,Qlq,Rlq) 
+fprintf('\n\b Trace Plq: %d\n', trace(Plq));
+
+% KF project
+Qkf = eye(4,4);
+Rkf = 1;
+L = dlqr(Aa',Ca',Qkf,Rkf)';
+
+%% Control solution simulator
+    % Simulation setup
+      tfinal = 5; % in seconds
+      N = round( tfinal/Ts ); % total number of samples
+      t = 0:Ts:N*Ts-Ts; % time vector to plot the results
+
+    % Reference sequence 
+       %r1(1:10) = 1; 
+       r1(1:N) = 1;
+    
+    % Load disturbance
+      do_x1(1:round(N/6))=0; do_x1(round(N/6+1):N) = 0*-0.01;
+      
+    % Disturbance sequences
+      var_w1 = 1e-4; w1 = 0*wgn(1,N,var_w1,'linear'); % Noise at x1
+      var_w2 = 1e-4; w2 = 0*wgn(1,N,var_w2,'linear'); % Noise at x2
+      var_w3 = 1e-4; w3 = 0*wgn(1,N,var_w3,'linear'); % Noise at x3
+      var_v1 = 1e-4; v1 = 0*wgn(1,N,var_v1,'linear'); % Noise at y1
+    
+for k = 1:1 % Initial conditions
+   % of the process
+     x(:,:,k) = [0 0 0]';
+     y(:,:,k) = Cd*x(:,:,k);
+     u(k) = 0;
+     
+   % of the estimator system (KF) in the velocity form
+     xa(:,:,k) = zeros(4,1); % Kalman filter estimated state vector
+     ya(:,:,k) = Ca*xa(:,:,k); % KF estimated output
+     
+     xest(:,:,k) = zeros(3,1);   
+   % LQR's control variation      
+    du(k) = 0;
+end
+
+for k = 2:N % Follow-up iterations
+    % Process dynamics (nominal model)
+    x(:,:,k) = Ad*x(:,:,k-1) +Bd*u(k-1) +[do_x1(k);0;0]  ... 
+        +[w1(k-1);w2(k-1);w3(k-1)];
+    y(:,:,k)=Cd*x(:,:,k) +[v1(k-1)];
+      
+    % The estimator system / Kalman filter
+     xa(:,:,k) = Aa*xa(:,:,k-1) +Ba*du(k-1) +L*(y(:,:,k-1)-ya(:,:,k-1)) ;
+     ya(:,:,k) = Ca*xa(:,:,k);
+    
+    % "Integrating" the KF data in order to obtain an estimate
+    % based on the nominal system state vector
+    xest(:,:,k) = xest(:,:,k-1) +xa(2:4,:,k);
+     
+    % Control variation using estimated full state feedback
+     du(k) = K(1)*r1(k) -K*xa(:,:,k);
+     u(k) = u(k-1) +du(k);
+end
+      
+% Plots
+figure(); % Output and Estimated Output
+    %subplot(211)
+        plot(t,r1,':k',t,y(1,:),'b',t,ya(1,:),'r',t,y_pid(1:N),'m');
+        legend('ref','y_{LQG}','y_{LQG estimated}','y_{PID}');
+        ylabel('aircraft pitch angle', ...
+            'Interpreter','LaTex','FontSize',14);
+        xlabel('Time [s]','Interpreter','LaTex','FontSize',14);
+        grid minor;
+        
+%     subplot(212)
+%         plot(t,u,'b');
+%         ylabel('u: control signal', ...
+%             'Interpreter','LaTex','FontSize',14);
+%         xlabel('Time (s)','Interpreter','LaTex','FontSize',14);
+%         grid minor;
+    title('Output PID and LQG', ...
+        'Interpreter','LaTex','FontSize',18);  
+      
+figure(); % State variables and Estimated State Variables
+    subplot(311)
+        plot(t,x(1,:),'b',t,xest(1,:),'r');
+        legend('x_{1}','xest_{1}');
+        ylabel('x1', ...
+            'Interpreter','LaTex','FontSize',10);
+        xlabel('Time [s]','Interpreter','LaTex','FontSize',10);
+        grid minor
+    subplot(312)
+        plot(t,x(2,:),'b',t,xest(2,:),'r');
+        legend('x_{2}','xest_{2}');
+        ylabel('x2', ...
+            'Interpreter','LaTex','FontSize',10);
+        xlabel('Time [s]','Interpreter','LaTex','FontSize',10);
+        grid minor
+    subplot(313)
+        plot(t,x(3,:),'b',t,xest(3,:),'r');
+        legend('x_{3}','xest_{3}');
+        ylabel('x3', ...
+            'Interpreter','LaTex','FontSize',10);
+        xlabel('Time [s]','Interpreter','LaTex','FontSize',10);
+        grid minor
+    sgtitle('State Variables and Estimated State Variables [LQG]', ...
+        'Interpreter','LaTex','FontSize',18);
+
+%% Performance analysis for comparison with article
+info_LQG = stepinfo(ya(1,:),t)
+%info_PID = stepinfo(y_pid(1:N),t)
+ISE_LQG = trapz(t,(1-ya).^2)
+%ISE_PID = trapz(t,(1-y_pid(1:N)).^2)
+for k=1:N,
+IAE_LQG(k) = abs(r1(k)-ya(1,k));
+%IAE_PID(k) = abs(r1(k)-y_pid(k));
+end
+IAE_LQG = sum(IAE_LQG)/N
+%IAE_PID = sum(IAE_PID)/N
